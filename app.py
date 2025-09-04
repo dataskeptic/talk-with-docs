@@ -33,12 +33,6 @@ with st.sidebar:
     )
     temperature = st.slider("🌡️ Temperatura", 0.0, 1.5, 0.2, help="Define a criatividade do modelo.")
 
-    st.header("🔍 Busca e Filtragem")
-    processo_filter = st.text_input(
-        "🔢 Filtrar por Nº do Processo",
-        placeholder="Ex: 23111.015169/2022-28",
-        help="Digite um ou mais números de processo, separados por vírgula."
-    )
     k = st.slider("Resultados Finais (k)", 3, 15, 6, help="Número de documentos que o LLM usará.")
     fetch_k = st.slider("Documentos Pré-selecionados (fetch_k)", 20, 100, 50, help="Documentos recuperados para MMR.")
     lambda_mult = st.slider("Diversidade (lambda)", 0.0, 1.0, 0.5, help="0.0 para relevância, 1.0 para diversidade.")
