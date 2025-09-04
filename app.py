@@ -56,7 +56,6 @@ class ArcticEmbeddings(Embeddings):
     def embed_query(self, text):
         return self.model.encode([text], prompt_name="query", normalize_embeddings=True)[0].tolist()
 
-# **CORREÇÃO 1: Melhorando a lógica de cache para a mensagem não persistir**
 # Inicializa o estado da sessão para controlar a mensagem de carregamento
 if 'embeddings_loaded' not in st.session_state:
     st.session_state.embeddings_loaded = False
@@ -67,14 +66,14 @@ def load_components():
     
     embeddings = ArcticEmbeddings(device="cpu")
     
-    index_path = "faiss_index"  # Nome correto da pasta
+    index_path = "faiss_index" 
     if not os.path.isdir(index_path):
         st.error(f"Pasta do índice ('{index_path}') não encontrada. Certifique-se de descompactar o arquivo do Colab aqui.")
         return None, None
         
     vector_store = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
     
-    # Atualiza o estado da sessão após o carregamento
+   
     st.session_state.embeddings_loaded = True
     return embeddings, vector_store
 
@@ -105,8 +104,8 @@ llm = ChatOpenAI(
     max_tokens=2048,
 )
 
-# **CORREÇÃO 2: Alinhando a chave de input para 'input'**
-# O `create_retrieval_chain` espera uma chave 'input' por padrão.
+
+
 prompt_template = """
 Você é um assistente especializado em analisar documentos oficiais da Universidade Federal do Piauí (UFPI).
 Responda à pergunta do usuário com base EXCLUSIVAMENTE no contexto fornecido abaixo.
@@ -137,7 +136,7 @@ if st.button("Analisar Atos", type="primary"):
     else:
         with st.spinner("🧠 Consultando a base de conhecimento e gerando a resposta..."):
             try:
-                # **CORREÇÃO 2 (continuação): Passando a pergunta com a chave 'input'**
+               
                 response = retrieval_chain.invoke({"input": question})
                 
                 st.markdown("### Resposta")
