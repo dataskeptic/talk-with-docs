@@ -63,8 +63,6 @@ if 'embeddings_loaded' not in st.session_state:
 @st.cache_resource
 def load_components():
     """Função única para carregar todos os componentes pesados."""
-    if not st.session_state.embeddings_loaded:
-        st.info("Carregando o modelo de embeddings... (pode levar um momento na primeira vez)")
     
     embeddings = ArcticEmbeddings(device="cpu")
     
