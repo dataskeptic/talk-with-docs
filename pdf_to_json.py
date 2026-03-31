@@ -106,24 +106,35 @@ def detect_ato_boundaries(lines: list[str]) -> list[dict]:
             next1 = lines[i + 1].strip()
 
             # A1: partial date on next line, rest on line after
-            #     e.g. "1/2/20" + "25" or "10/7/2" + "025"
-            m_partial = re.match(r"^(\d{1,2}/\d{1,2}/\d{1,3})$", next1)
+            #     e.g. "1/2/20"+"25", "10/7/2"+"025", "20/01/"+"20258"
+            m_partial = re.match(r"^(\d{1,2}/\d{1,2}/)(\d{0,3})$", next1)
             if m_partial and i + 2 < n:
+                date_prefix = m_partial.group(1)  # e.g. "20/01/"
+                year_frag = m_partial.group(2)     # e.g. "" or "20" or "2"
                 rest_line = lines[i + 2].strip()
-                m_rest = re.match(r"^(\d{1,3})\b", rest_line)
+                m_rest = re.match(r"^(\d+)", rest_line)
                 if m_rest:
-                    date_str = m_partial.group(1) + m_rest.group(1)
-                    # Validate reconstructed date has 4-digit year
-                    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", date_str):
-                        extra = rest_line[m_rest.end():].strip()
-                        boundaries.append({
-                            "line_idx": i,
-                            "ato_number": ato_num,
-                            "date": date_str,
-                            "header_end_line": i + 3,
-                            "extra_text": extra,
-                        })
+                    combined_year = year_frag + m_rest.group(1)
+                    if len(combined_year) >= 4:
+                        # Take exactly enough digits to complete 4-digit year
+                        date_str = date_prefix + combined_year[:4]
+                        consumed = 4 - len(year_frag)
+                        extra = rest_line[consumed:].strip()
+                    elif len(combined_year) == 3:
+                        # Accept 3-digit year (PDF extraction artifact)
+                        date_str = date_prefix + combined_year
+                        consumed = len(m_rest.group(1))
+                        extra = rest_line[consumed:].strip()
+                    else:
                         continue
+                    boundaries.append({
+                        "line_idx": i,
+                        "ato_number": ato_num,
+                        "date": date_str,
+                        "header_end_line": i + 3,
+                        "extra_text": extra,
+                    })
+                    continue
 
             # A2: full date (+ possible name text) on next line
             m_full = re.match(r"^(\d{1,2}/\d{1,2}/\d{4})\b(.*)", next1)
@@ -143,28 +154,36 @@ def detect_ato_boundaries(lines: list[str]) -> list[dict]:
             continue
 
         # ── Format B: number + partial date on same line ──
-        #     e.g. "793 5/2/20" + "25" or "2037 11/3/202" + "5"
-        m_b = re.match(r"^(\d{1,4})\s+(\d{1,2}/\d{1,2}/\d{1,3})$", stripped)
+        #     e.g. "793 5/2/20"+"25", "2037 11/3/202"+"5"
+        m_b = re.match(r"^(\d{1,4})\s+(\d{1,2}/\d{1,2}/)(\d{0,3})$", stripped)
         if m_b:
             ato_num = int(m_b.group(1))
-            date_part = m_b.group(2)
+            date_prefix = m_b.group(2)
+            year_frag = m_b.group(3)
 
             if i + 1 < n:
                 rest_line = lines[i + 1].strip()
-                m_rest = re.match(r"^(\d{1,3})\b", rest_line)
+                m_rest = re.match(r"^(\d+)", rest_line)
                 if m_rest:
-                    date_str = date_part + m_rest.group(1)
-                    # Validate reconstructed date has 4-digit year
-                    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", date_str):
-                        extra = rest_line[m_rest.end():].strip()
-                        boundaries.append({
-                            "line_idx": i,
-                            "ato_number": ato_num,
-                            "date": date_str,
-                            "header_end_line": i + 2,
-                            "extra_text": extra,
-                        })
+                    combined_year = year_frag + m_rest.group(1)
+                    if len(combined_year) >= 4:
+                        date_str = date_prefix + combined_year[:4]
+                        consumed = 4 - len(year_frag)
+                        extra = rest_line[consumed:].strip()
+                    elif len(combined_year) == 3:
+                        date_str = date_prefix + combined_year
+                        consumed = len(m_rest.group(1))
+                        extra = rest_line[consumed:].strip()
+                    else:
                         continue
+                    boundaries.append({
+                        "line_idx": i,
+                        "ato_number": ato_num,
+                        "date": date_str,
+                        "header_end_line": i + 2,
+                        "extra_text": extra,
+                    })
+                    continue
             continue
 
         # ── Format C: number + full date (+ text) on same line ──
