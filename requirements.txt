@@ -5,4 +5,6 @@ langchain-community
 langchain-core
 langchain-openai
 sentence_transformers
-faiss-cpu 
+faiss-cpu
+PyMuPDF
+
