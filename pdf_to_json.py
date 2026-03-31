@@ -2,8 +2,8 @@
 """
 PDF-to-JSON converter for UFPI "Atos da Reitoria" documents.
 
-Handles multiple PDF text layout formats:
-  A) Ato number alone on line, date split across 2 lines
+Handles multiple PDF text layout formats via line-by-line scanning:
+  A) Ato number alone on line, date split across next 2 lines
   B) Ato number + partial date on same line, rest on next line
   C) Ato number + full date (+ person start) all on one line
 
@@ -55,7 +55,6 @@ def year_from_path(filepath: Path) -> int | None:
 # ── Field extractors ─────────────────────────────────────────────────────────
 
 def extract_siape(text: str) -> list[str]:
-    """Extract SIAPE registration numbers from text."""
     found = []
     for match in re.finditer(r"SIAPE\s+(?:n\.?[º°]?\s*)?(\d{5,8})", text, re.IGNORECASE):
         num = match.group(1)
@@ -65,7 +64,6 @@ def extract_siape(text: str) -> list[str]:
 
 
 def extract_processes(text: str) -> list[str]:
-    """Extract process numbers like '23111.034471/2024-49'."""
     found = []
     for match in re.finditer(r"\d{4,5}\.\d{5,6}/\d{4}-\d{2}", text):
         num = match.group(0)
@@ -75,7 +73,6 @@ def extract_processes(text: str) -> list[str]:
 
 
 def parse_date_to_iso(raw_date: str) -> str:
-    """Convert M/D/YYYY to ISO YYYY-MM-DD."""
     raw_date = raw_date.strip()
     m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", raw_date)
     if m:
@@ -85,58 +82,110 @@ def parse_date_to_iso(raw_date: str) -> str:
     return raw_date
 
 
-# ── Text normalization ───────────────────────────────────────────────────────
+# ── Phase 1: Detect ato boundaries (READ-ONLY scan, no list mutation) ────────
 
-def normalize_text(raw_text: str) -> str:
+def detect_ato_boundaries(lines: list[str]) -> list[dict]:
     """
-    Normalize the raw PDF text so that all ato boundaries follow a uniform
-    pattern: '<number> <full_date>' on one logical unit.
-
-    Step 1: Reconstruct split dates.
-        '1/2/20\\n25'   → '1/2/2025'
-        '11/3/202\\n5'  → '11/3/2025'
-        '12/1/202\\n5'  → '12/1/2025'
-
-    Step 2: After this normalization, all ato boundaries will match:
-        '<number> <M/D/YYYY>'
-    regardless of whether they were originally split across lines or not.
+    Scan ALL lines to find ato boundaries. Never skips lines or mutates list.
+    Returns list of {"line_idx", "ato_number", "date", "header_end_line", "extra_text"}.
     """
-    # Join split dates: partial_date\nremaining_digits
-    # Matches patterns like "5/2/20\n25" or "11/3/202\n5" or "12/1/202\n5"
-    normalized = re.sub(
-        r"(\d{1,2}/\d{1,2}/\d{2,3})\s*\n\s*(\d{1,2})\b",
-        r"\1\2",
-        raw_text,
-    )
-    return normalized
-
-
-def find_ato_boundaries(text: str) -> list[tuple[int, int, str, int]]:
-    """
-    Find all ato boundary positions in the normalized text.
-
-    Returns list of (start_pos, ato_number, date_str, end_of_header_pos).
-
-    Matches patterns like:
-        '001 1/2/2025'         (on its own line or mid-line)
-        '1223 7/1/2025 JOAO'   (number + date + name on same line)
-        '793 5/2/2025'         (after normalization from split date)
-    """
-    # Pattern: 1-4 digit number, whitespace, then M/D/YYYY date
-    pattern = r"(?:^|\n)\s*(\d{1,4})\s+(\d{1,2}/\d{1,2}/\d{4})\b"
     boundaries = []
+    n = len(lines)
 
-    for m in re.finditer(pattern, text):
-        ato_number = int(m.group(1))
-        date_str = m.group(2)
-        start_pos = m.start()
-        end_pos = m.end()
-        boundaries.append((start_pos, ato_number, date_str, end_pos))
+    for i in range(n):
+        stripped = lines[i].strip()
+        if not stripped:
+            continue
+
+        # ── Format A: standalone number, then date on next lines ──
+        if re.fullmatch(r"\d{1,4}", stripped):
+            ato_num = int(stripped)
+
+            if i + 1 >= n:
+                continue
+            next1 = lines[i + 1].strip()
+
+            # A1: partial date on next line, rest on line after
+            #     e.g. "1/2/20" + "25" or "10/7/2" + "025"
+            m_partial = re.match(r"^(\d{1,2}/\d{1,2}/\d{1,3})$", next1)
+            if m_partial and i + 2 < n:
+                rest_line = lines[i + 2].strip()
+                m_rest = re.match(r"^(\d{1,3})\b", rest_line)
+                if m_rest:
+                    date_str = m_partial.group(1) + m_rest.group(1)
+                    # Validate reconstructed date has 4-digit year
+                    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", date_str):
+                        extra = rest_line[m_rest.end():].strip()
+                        boundaries.append({
+                            "line_idx": i,
+                            "ato_number": ato_num,
+                            "date": date_str,
+                            "header_end_line": i + 3,
+                            "extra_text": extra,
+                        })
+                        continue
+
+            # A2: full date (+ possible name text) on next line
+            m_full = re.match(r"^(\d{1,2}/\d{1,2}/\d{4})\b(.*)", next1)
+            if m_full:
+                date_str = m_full.group(1)
+                extra = m_full.group(2).strip()
+                boundaries.append({
+                    "line_idx": i,
+                    "ato_number": ato_num,
+                    "date": date_str,
+                    "header_end_line": i + 2,
+                    "extra_text": extra,
+                })
+                continue
+
+            # Not a valid ato boundary, just a random number
+            continue
+
+        # ── Format B: number + partial date on same line ──
+        #     e.g. "793 5/2/20" + "25" or "2037 11/3/202" + "5"
+        m_b = re.match(r"^(\d{1,4})\s+(\d{1,2}/\d{1,2}/\d{1,3})$", stripped)
+        if m_b:
+            ato_num = int(m_b.group(1))
+            date_part = m_b.group(2)
+
+            if i + 1 < n:
+                rest_line = lines[i + 1].strip()
+                m_rest = re.match(r"^(\d{1,3})\b", rest_line)
+                if m_rest:
+                    date_str = date_part + m_rest.group(1)
+                    # Validate reconstructed date has 4-digit year
+                    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", date_str):
+                        extra = rest_line[m_rest.end():].strip()
+                        boundaries.append({
+                            "line_idx": i,
+                            "ato_number": ato_num,
+                            "date": date_str,
+                            "header_end_line": i + 2,
+                            "extra_text": extra,
+                        })
+                        continue
+            continue
+
+        # ── Format C: number + full date (+ text) on same line ──
+        m_c = re.match(r"^(\d{1,4})\s+(\d{1,2}/\d{1,2}/\d{4})\b(.*)", stripped)
+        if m_c:
+            ato_num = int(m_c.group(1))
+            date_str = m_c.group(2)
+            extra = m_c.group(3).strip()
+            boundaries.append({
+                "line_idx": i,
+                "ato_number": ato_num,
+                "date": date_str,
+                "header_end_line": i + 1,
+                "extra_text": extra,
+            })
+            continue
 
     return boundaries
 
 
-# ── Ato parsing ──────────────────────────────────────────────────────────────
+# ── Phase 2: Parse each ato's body ───────────────────────────────────────────
 
 ACTION_VERBS = [
     "Designar", "Conceder", "Autorizar", "Remover", "Dispensar",
@@ -146,111 +195,77 @@ ACTION_VERBS = [
 ]
 
 
-def extract_person_from_body(body: str) -> str:
-    """
-    Extract person name from the beginning of the body text.
-    The name is the text before 'Processo' or an action verb.
-    """
-    lines = body.strip().split("\n")
+def extract_person_from_lines(body_lines: list[str]) -> str:
     name_parts = []
-
-    for line in lines:
+    for line in body_lines:
         stripped = line.strip()
         if not stripped:
             continue
-
-        # Stop at "Processo" line
         if re.match(r"^[Pp]rocesso", stripped):
             break
-
-        # Stop at action verb lines
         if any(stripped.startswith(verb) for verb in ACTION_VERBS):
             break
-
-        # Stop at numbered items like "1. ..." or "- o Processo"
-        if re.match(r"^(\d+\.\s|[-–])", stripped):
+        if re.match(r"^(\d+\.\s|[-–]\s)", stripped):
             break
-
         name_parts.append(stripped)
 
     if name_parts:
-        name = " ".join(name_parts)
-        name = re.sub(r"\s+", " ", name).strip()
-        return name
-
+        return re.sub(r"\s+", " ", " ".join(name_parts)).strip()
     return ""
 
 
-def build_description(body: str) -> str:
-    """
-    Build description from body text, starting from 'Processo' or action verb.
-    """
-    lines = body.strip().split("\n")
+def build_description(body_lines: list[str]) -> str:
     started = False
-    desc_lines = []
+    desc_parts = []
 
-    for line in lines:
+    for line in body_lines:
         stripped = line.strip()
         if not stripped:
-            if started:
-                desc_lines.append("")
             continue
-
         if not started:
             if re.match(r"^[Pp]rocesso", stripped):
                 started = True
             elif any(stripped.startswith(verb) for verb in ACTION_VERBS):
                 started = True
-            elif re.match(r"^(\d+\.\s|[-–])", stripped):
+            elif re.match(r"^(\d+\.\s|[-–]\s)", stripped):
                 started = True
-
         if started:
-            desc_lines.append(stripped)
+            desc_parts.append(stripped)
 
-    result = " ".join(desc_lines)
-    result = re.sub(r"\s+", " ", result).strip()
-    return result
+    return re.sub(r"\s+", " ", " ".join(desc_parts)).strip()
 
 
-def parse_atos(text: str) -> list[dict]:
-    """
-    Parse all atos from the full (normalized) text of content pages.
-    """
-    # Step 1: Normalize split dates
-    text = normalize_text(text)
-
-    # Step 2: Find all ato boundaries
-    boundaries = find_ato_boundaries(text)
+def parse_atos(content_text: str) -> list[dict]:
+    lines = content_text.split("\n")
+    boundaries = detect_ato_boundaries(lines)
 
     if not boundaries:
         return []
 
-    # Step 3: Extract each ato's body text
     atos = []
-    for i, (start_pos, ato_number, date_str, header_end) in enumerate(boundaries):
-        # Body extends from after the header to the start of the next ato
-        if i + 1 < len(boundaries):
-            body_end = boundaries[i + 1][0]
+    for idx, bnd in enumerate(boundaries):
+        # Body = lines from header_end_line to the start of the next boundary
+        body_start = bnd["header_end_line"]
+        if idx + 1 < len(boundaries):
+            body_end = boundaries[idx + 1]["line_idx"]
         else:
-            body_end = len(text)
+            body_end = len(lines)
 
-        # The "body" is everything after "number date" up to the next ato
-        body = text[header_end:body_end].strip()
+        body_lines = lines[body_start:body_end]
 
-        # Extract fields
-        person = extract_person_from_body(body)
-        siape = extract_siape(body)
-        processes = extract_processes(body)
-        description = build_description(body)
-        date_iso = parse_date_to_iso(date_str)
+        # Prepend any extra text that was on the date line (e.g. person name)
+        if bnd["extra_text"]:
+            body_lines = [bnd["extra_text"]] + body_lines
+
+        body_text = "\n".join(body_lines)
 
         atos.append({
-            "ato_number": ato_number,
-            "date": date_iso,
-            "person": person,
-            "siape": siape,
-            "processes": processes,
-            "description": description,
+            "ato_number": bnd["ato_number"],
+            "date": parse_date_to_iso(bnd["date"]),
+            "person": extract_person_from_lines(body_lines),
+            "siape": extract_siape(body_text),
+            "processes": extract_processes(body_text),
+            "description": build_description(body_lines),
         })
 
     return atos
@@ -259,7 +274,6 @@ def parse_atos(text: str) -> list[dict]:
 # ── PDF extraction ───────────────────────────────────────────────────────────
 
 def extract_pages(pdf_path: str) -> list[str]:
-    """Extract text from each page of the PDF."""
     doc = fitz.open(pdf_path)
     pages = [page.get_text("text") for page in doc]
     doc.close()
@@ -267,18 +281,12 @@ def extract_pages(pdf_path: str) -> list[str]:
 
 
 def convert_pdf_to_json(pdf_path: Path) -> dict:
-    """Convert a single PDF file to our JSON structure."""
     year = year_from_path(pdf_path)
     month = month_from_filename(pdf_path.name)
     month_name = MONTH_NUM_TO_NAME.get(month, "") if month else ""
 
     pages = extract_pages(str(pdf_path))
-
-    # First page = description (header)
-    description = pages[0].strip() if pages else ""
-    description = re.sub(r"\n{3,}", "\n\n", description)
-
-    # Remaining pages = ato content
+    description = re.sub(r"\n{3,}", "\n\n", pages[0].strip()) if pages else ""
     content = "\n".join(pages[1:]) if len(pages) > 1 else ""
     atos = parse_atos(content)
 
@@ -322,16 +330,15 @@ def process_directory(input_dir: str, output_dir: str):
         try:
             result = convert_pdf_to_json(pdf_file)
             json_dest.parent.mkdir(parents=True, exist_ok=True)
-
             with open(json_dest, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
-
             n = result["total_atos"]
             total_atos += n
             print(f"✅ {n} atos extracted → {json_name}")
-
         except Exception as e:
+            import traceback
             print(f"❌ Error: {e}")
+            traceback.print_exc()
 
     print(f"\n{'='*50}")
     print(f"  ✅ Done! {total_atos} total atos from {len(pdf_files)} PDFs")
