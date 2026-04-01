@@ -1,3 +1,4 @@
 documents
 .venv
 json_output
+dump_pdf_text.py
